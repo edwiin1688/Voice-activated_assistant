@@ -477,3 +477,10 @@ $RECYCLE.BIN/
 *.lnk
 /.idea
 /folderico-blue.ico
+
+# Audio files
+*.wav
+
+# Whisper models
+ggml-tiny-q5_1.bin
+ggml-tiny-zh_tw.bin

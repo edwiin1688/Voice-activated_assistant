@@ -9,39 +9,30 @@ namespace Voice_activated_assistant
     {
         private WaveInEvent? waveSource = null;
         private WaveFileWriter? waveFile = null;
+        private MemoryStream? memoryStream = null;
         private bool isRecording = false;
-        private readonly double threshold = 0.001; // 設定聲音偵測的閾值
-        public string outputFilePath = "";
+        private readonly float threshold = 0.005f; // 調低閾值，確保更容易偵測到聲音
+        private DateTime lastVoiceTime = DateTime.MinValue;
+        private readonly int silenceDurationMs = 1500; // 連續 1.5 秒沒聲音就停止錄音
+        private bool isSpeaking = false;
 
-        /// <summary>
-        /// 開始錄音
-        /// </summary>
-        /// <param name="outputFilePath"></param>
         public void StartRecording()
         {
-            this.outputFilePath = DateTime.Now.ToString("yyyy_MM_dd_HH_mm_ss_fff") + ".wav";
-
+            memoryStream = new MemoryStream();
             waveSource = new WaveInEvent
             {
-                WaveFormat = new WaveFormat(16000, 1) // 設置錄音的格式，這裡為 CD 質量
+                WaveFormat = new WaveFormat(16000, 1)
             };
 
             waveSource.DataAvailable += new EventHandler<WaveInEventArgs>(WaveSource_DataAvailable);
             waveSource.RecordingStopped += new EventHandler<StoppedEventArgs>(WaveSource_RecordingStopped);
 
-            //Console.WriteLine($"✅ {this.outputFilePath} 開始錄音，請說:");
-
+            isSpeaking = false;
             waveSource.StartRecording();
         }
 
-        /// <summary>
-        /// 可用資料
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void WaveSource_DataAvailable(object sender, WaveInEventArgs e)
+        private void WaveSource_DataAvailable(object? sender, WaveInEventArgs e)
         {
-            // 計算音頻數據的振幅
             float amplitude = 0;
             for (int index = 0; index < e.BytesRecorded; index += 2)
             {
@@ -50,58 +41,99 @@ namespace Voice_activated_assistant
             }
             amplitude /= (e.BytesRecorded / 2);
 
-            // 如果振幅超過閾值，則開始錄音
-            if (amplitude > threshold && !isRecording)
+            // 如果有人正在說話，可以取消註解下一行來觀察音控數值
+            // Console.Write($"\r音量: {amplitude:F4} ".PadRight(20));
+
+            // 判斷當前是否有聲音
+            if (amplitude > threshold)
             {
-                waveFile = new WaveFileWriter(this.outputFilePath, waveSource?.WaveFormat);
-                isRecording = true;
+                lastVoiceTime = DateTime.Now;
+                if (!isSpeaking)
+                {
+                    isSpeaking = true;
+                    Console.WriteLine("\n🎤 偵測到聲音，開始錄製...");
+                }
+
+                if (!isRecording && memoryStream != null)
+                {
+                    waveFile = new WaveFileWriter(new IgnoreDisposeStream(memoryStream), waveSource!.WaveFormat);
+                    isRecording = true;
+                }
             }
 
-            // 如果正在錄音，則將音頻數據寫入檔案
+            // 如果正在錄音，寫入數據
             if (isRecording)
             {
                 waveFile?.Write(e.Buffer, 0, e.BytesRecorded);
                 waveFile?.Flush();
+
+                // 檢查是否超過靜音時間
+                if (isSpeaking && (DateTime.Now - lastVoiceTime).TotalMilliseconds > silenceDurationMs)
+                {
+                    // 不要在此處對自己調用 StopRecording() 避免阻塞回呼執行緒
+                    // 我們透過讓 StopRecording 被外部調用或標記狀態來處理
+                    isSpeaking = false; 
+                }
             }
         }
 
-        /// <summary>
-        /// 停止錄音
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="e"></param>
-        private void WaveSource_RecordingStopped(object sender, StoppedEventArgs e)
+        private void WaveSource_RecordingStopped(object? sender, StoppedEventArgs e)
         {
-            waveSource?.Dispose();
-            waveSource = null;
-
             waveFile?.Dispose();
             waveFile = null;
-
+            waveSource?.Dispose();
+            waveSource = null;
             isRecording = false;
+            isSpeaking = false;
         }
 
-        /// <summary>
-        /// 停止錄音
-        /// </summary>
         public void StopRecording()
         {
-            waveSource?.StopRecording();
-            while (isRecording)
+            if (waveSource != null)
             {
-                Thread.Sleep(100); // 等待一段時間，例如0.1秒
+                waveSource.StopRecording();
+                // 等待錄音真正停止 (DataAvailable 不再進來且 File 已 Dispose)
+                int timeout = 0;
+                while (isRecording && timeout < 20)
+                {
+                    Thread.Sleep(50);
+                    timeout++;
+                }
             }
-            //Console.WriteLine($"🈚 {this.outputFilePath} 錄音結束!");
         }
 
-        /// <summary>
-        /// 判斷是否在錄音中
-        /// </summary>
-        /// <returns></returns>
-        public bool IsRecording()
+        public Stream? GetAudioStream()
         {
-            return isRecording;
+            if (memoryStream == null) return null;
+            if (memoryStream.Length < 1000) // 1000 bytes 左右大約才不到 0.1 秒的音訊
+            {
+                return null;
+            }
+            Console.WriteLine($"📦 準備辨識音訊流 (大小: {memoryStream.Length / 1024.0:F2} KB)");
+            memoryStream.Position = 0;
+            return memoryStream;
         }
 
+        public bool IsRecording() => isRecording;
+        public bool IsSpeaking() => isSpeaking; 
+        public bool ShouldStopDueToSilence() => isRecording && isSpeaking == false && (DateTime.Now - lastVoiceTime).TotalMilliseconds > silenceDurationMs;
+
+
+        private class IgnoreDisposeStream : Stream
+        {
+            private readonly Stream _inner;
+            public IgnoreDisposeStream(Stream inner) => _inner = inner;
+            public override bool CanRead => _inner.CanRead;
+            public override bool CanSeek => _inner.CanSeek;
+            public override bool CanWrite => _inner.CanWrite;
+            public override long Length => _inner.Length;
+            public override long Position { get => _inner.Position; set => _inner.Position = value; }
+            public override void Flush() => _inner.Flush();
+            public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+            public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+            public override void SetLength(long value) => _inner.SetLength(value);
+            public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
+            protected override void Dispose(bool disposing) { }
+        }
     }
 }

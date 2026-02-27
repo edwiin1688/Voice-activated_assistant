@@ -1,0 +1,11 @@
+  正在判斷要還原的專案...
+  所有專案都在最新狀態，可進行還原。
+D:\github\chiisen\Voice-activated_assistant\Voice-activated_assistant\Program.cs(64,6): error CS1061: 'WhisperProcessorBuilder' 未包含 'WithGreedySampling' 的定義，也找不到可接受類型 'WhisperProcessorBuilder' 第一個引數的可存取擴充方法 'WithGreedySampling' (是否遺漏 using 指示詞或組件參考?) [D:\github\chiisen\Voice-activated_assistant\Voice-activated_assistant\Voice-activated_assistant.csproj]
+
+建置失敗。
+
+D:\github\chiisen\Voice-activated_assistant\Voice-activated_assistant\Program.cs(64,6): error CS1061: 'WhisperProcessorBuilder' 未包含 'WithGreedySampling' 的定義，也找不到可接受類型 'WhisperProcessorBuilder' 第一個引數的可存取擴充方法 'WithGreedySampling' (是否遺漏 using 指示詞或組件參考?) [D:\github\chiisen\Voice-activated_assistant\Voice-activated_assistant\Voice-activated_assistant.csproj]
+    0 個警告
+    1 個錯誤
+
+經過時間 00:00:01.01
