@@ -60,11 +60,19 @@ else
 Console.WriteLine($"\n🚀 正在啟動語音助理，使用模型: {modelName}");
 using var whisperFactory = WhisperFactory.FromPath(modelName);
 using var processor = whisperFactory.CreateBuilder()
-    .WithLanguage("auto") // auto、zh-TW、zh-CN、zh
-    .WithThreads(Environment.ProcessorCount) // 使用所有可用的執行緒以達到最高速度
+    .WithLanguage("zh") 
+    .WithPrompt("你好。嗨。請問有什麼事嗎？") 
+    .WithTemperature(0.0f) // 關閉隨機性，讓模型更保守，降低幻覺
+    .WithNoSpeechThreshold(0.6f) // 若偵測為「非語音」機率 > 0.6，則不予轉譯
+    .WithLogProbThreshold(-1.0f) // 過濾掉信心程度過低的結果
+    .WithThreads(Environment.ProcessorCount)
     .Build();
 
-var recorder = new AudioRecorder();
+// 降低處理續優先權，讓它在背景執行時不干擾主程式
+using var currentProcess = System.Diagnostics.Process.GetCurrentProcess();
+currentProcess.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal;
+
+using var recorder = new AudioRecorder();
 bool isRunning = true;
 
 // 初始化 TTS
@@ -73,18 +81,25 @@ synth.SetOutputToDefaultAudioDevice();
 
 string readyMsg = "程式準備完畢，請說話！";
 Console.WriteLine($"\n✅ {readyMsg}\n");
-synth.SpeakAsync(readyMsg); // 非同步播放，不卡住啟動流程
+synth.Speak(readyMsg); // 使用同步播放，確保說完才進入監聽迴圈
 
 while (isRunning)
 {
-    Console.Write("\r🎙️  正在聽...".PadRight(30));
+    // 檢查 TTS 是否正在說話，若是則等待（防止錄到自己的聲音）
+    while (synth.State == SynthesizerState.Speaking)
+    {
+        await Task.Delay(500);
+    }
+
     recorder.StartRecording();
     
-    // 動態等待：最長等待 15 秒，或者直到偵測到說話結束（靜音自動停止）
-    int maxWaitMs = 15000;
+    int maxWaitMs = 15000; // 恢復為較長的監聽上限
     int waitedMs = 0;
     while (waitedMs < maxWaitMs)
     {
+        int elapsedSeconds = waitedMs / 1000;
+        Console.Write($"\r🎙️  監聽中 ({elapsedSeconds}s)...".PadRight(20));
+
         if (recorder.ShouldStopDueToSilence()) 
         {
             Console.WriteLine("\n🛑 偵測到停頓，處理中...");
@@ -101,14 +116,19 @@ while (isRunning)
     }
     recorder.StopRecording();
 
+    if (!isRunning) break;
+
     using var audioStream = recorder.GetAudioStream();
     if (audioStream != null && audioStream.Length > 0)
     {
-        Console.WriteLine("\r⚙️  辨識中...".PadRight(30));
+        Console.WriteLine("\r⚙️  轉譯中...".PadRight(20));
         await foreach (var result in processor.ProcessAsync(audioStream))
         {
-            Console.WriteLine($"{DateTime.Now:HH:mm:ss} | {result.Start}->{result.End}: {result.Text}");
+            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {result.Text}");
         }
+        
+        // 轉譯完成後主動釋放記憶體，適合長駐執行
+        GC.Collect(1);
     }
 }
 

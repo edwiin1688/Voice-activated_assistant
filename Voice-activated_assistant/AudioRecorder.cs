@@ -5,36 +5,52 @@ namespace Voice_activated_assistant
     /// <summary>
     /// 使用 NAudio 錄音
     /// </summary>
-    public class AudioRecorder
+    public class AudioRecorder : IDisposable
     {
         private WaveInEvent? waveSource = null;
         private WaveFileWriter? waveFile = null;
-        private MemoryStream? memoryStream = null;
+        private readonly MemoryStream memoryStream = new MemoryStream();
         private bool isRecording = false;
-        private readonly float threshold = 0.005f; // 調低閾值，確保更容易偵測到聲音
-        private DateTime lastVoiceTime = DateTime.MinValue;
-        private readonly int silenceDurationMs = 1500; // 連續 1.5 秒沒聲音就停止錄音
         private bool isSpeaking = false;
+        private readonly float threshold = 0.008f; // 稍微調高一些，過濾更微弱的環境底噪
+        private DateTime lastVoiceTime = DateTime.MinValue;
+        private readonly int silenceDurationMs = 1500;
 
-        public void StartRecording()
+        // 預錄緩衝區：保存觸發前約 400ms 的音訊 (確保起手字完整)
+        private readonly List<byte[]> preRollBuffer = new List<byte[]>();
+        private readonly int maxPreRollBlocks = 20; 
+
+        public AudioRecorder()
         {
-            memoryStream = new MemoryStream();
+            // 初始化錄音設備並保持長駐，避免重覆建立
             waveSource = new WaveInEvent
             {
                 WaveFormat = new WaveFormat(16000, 1)
             };
-
-            waveSource.DataAvailable += new EventHandler<WaveInEventArgs>(WaveSource_DataAvailable);
-            waveSource.RecordingStopped += new EventHandler<StoppedEventArgs>(WaveSource_RecordingStopped);
-
-            isSpeaking = false;
+            waveSource.DataAvailable += WaveSource_DataAvailable;
             waveSource.StartRecording();
+        }
+
+        public void StartRecording()
+        {
+            // 重置記憶體流而不重新分配空間
+            lock (memoryStream)
+            {
+                memoryStream.SetLength(0);
+                memoryStream.Position = 0;
+            }
+            isRecording = true;
+            isSpeaking = false;
+            lastVoiceTime = DateTime.MinValue;
+            preRollBuffer.Clear();
         }
 
         private void WaveSource_DataAvailable(object? sender, WaveInEventArgs e)
         {
+            if (!isRecording) return;
+
             float amplitude = 0;
-            for (int index = 0; index < e.BytesRecorded; index += 2)
+            for (int index = 0; index < e.BytesRecorded; index += 2) // 全量掃描以提高精準度
             {
                 short sample = BitConverter.ToInt16(e.Buffer, index);
                 amplitude += Math.Abs(sample / 32768f);
@@ -44,80 +60,82 @@ namespace Voice_activated_assistant
             // 如果有人正在說話，可以取消註解下一行來觀察音控數值
             // Console.Write($"\r音量: {amplitude:F4} ".PadRight(20));
 
-            // 判斷當前是否有聲音
             if (amplitude > threshold)
             {
                 lastVoiceTime = DateTime.Now;
                 if (!isSpeaking)
                 {
                     isSpeaking = true;
-                    Console.WriteLine("\n🎤 偵測到聲音，開始錄製...");
+                    Console.WriteLine("\n🎤 偵測到聲音...");
+                    
+                    lock (memoryStream)
+                    {
+                        if (waveFile == null)
+                        {
+                            waveFile = new WaveFileWriter(new IgnoreDisposeStream(memoryStream), waveSource!.WaveFormat);
+                            // 寫入預錄段，確保開頭完整
+                            foreach (var block in preRollBuffer)
+                            {
+                                waveFile.Write(block, 0, block.Length);
+                            }
+                            preRollBuffer.Clear();
+                        }
+                    }
                 }
 
-                if (!isRecording && memoryStream != null)
+                lock (memoryStream)
                 {
-                    waveFile = new WaveFileWriter(new IgnoreDisposeStream(memoryStream), waveSource!.WaveFormat);
-                    isRecording = true;
+                    waveFile?.Write(e.Buffer, 0, e.BytesRecorded);
                 }
             }
-
-            // 如果正在錄音，寫入數據
-            if (isRecording)
+            else
             {
-                waveFile?.Write(e.Buffer, 0, e.BytesRecorded);
-                waveFile?.Flush();
-
-                // 檢查是否超過靜音時間
-                if (isSpeaking && (DateTime.Now - lastVoiceTime).TotalMilliseconds > silenceDurationMs)
+                if (isSpeaking)
                 {
-                    // 不要在此處對自己調用 StopRecording() 避免阻塞回呼執行緒
-                    // 我們透過讓 StopRecording 被外部調用或標記狀態來處理
-                    isSpeaking = false; 
+                    // 說話中但暫時短暫低於門檻，持續錄音
+                    lock (memoryStream) { waveFile?.Write(e.Buffer, 0, e.BytesRecorded); }
+                }
+                else
+                {
+                    // 尚未觸發說話，將當前段存入預錄衝緩
+                    preRollBuffer.Add(e.Buffer.ToArray());
+                    if (preRollBuffer.Count > maxPreRollBlocks) preRollBuffer.RemoveAt(0);
                 }
             }
-        }
-
-        private void WaveSource_RecordingStopped(object? sender, StoppedEventArgs e)
-        {
-            waveFile?.Dispose();
-            waveFile = null;
-            waveSource?.Dispose();
-            waveSource = null;
-            isRecording = false;
-            isSpeaking = false;
         }
 
         public void StopRecording()
         {
-            if (waveSource != null)
+            isRecording = false;
+            isSpeaking = false;
+            lock (memoryStream)
             {
-                waveSource.StopRecording();
-                // 等待錄音真正停止 (DataAvailable 不再進來且 File 已 Dispose)
-                int timeout = 0;
-                while (isRecording && timeout < 20)
-                {
-                    Thread.Sleep(50);
-                    timeout++;
-                }
+                waveFile?.Dispose();
+                waveFile = null;
             }
         }
 
         public Stream? GetAudioStream()
         {
-            if (memoryStream == null) return null;
-            if (memoryStream.Length < 1000) // 1000 bytes 左右大約才不到 0.1 秒的音訊
+            lock (memoryStream)
             {
-                return null;
+                if (memoryStream.Length < 1000) return null;
+                // Console.WriteLine($"📦 準備辨識音訊流 (大小: {memoryStream.Length / 1024.0:F2} KB)"); // Removed as per instruction
+                return new MemoryStream(memoryStream.ToArray());
             }
-            Console.WriteLine($"📦 準備辨識音訊流 (大小: {memoryStream.Length / 1024.0:F2} KB)");
-            memoryStream.Position = 0;
-            return memoryStream;
         }
 
         public bool IsRecording() => isRecording;
-        public bool IsSpeaking() => isSpeaking; 
-        public bool ShouldStopDueToSilence() => isRecording && isSpeaking == false && (DateTime.Now - lastVoiceTime).TotalMilliseconds > silenceDurationMs;
+        // public bool IsSpeaking() => isSpeaking; // Removed as per instruction
+        public bool ShouldStopDueToSilence() => isRecording && isSpeaking && (DateTime.Now - lastVoiceTime).TotalMilliseconds > silenceDurationMs;
 
+        public void Dispose()
+        {
+            waveSource?.StopRecording();
+            waveSource?.Dispose();
+            waveFile?.Dispose();
+            memoryStream.Dispose();
+        }
 
         private class IgnoreDisposeStream : Stream
         {
