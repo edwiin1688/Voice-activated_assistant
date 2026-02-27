@@ -1,7 +1,7 @@
 # Voice-activated_assistant
 試做一個【語音助理】
 
-![語音助理](./image/Voice-activated_assistant.gif)
+![語音助理](./images/Voice-activated_assistant.gif)
 
 ## 快速啟動
 1. **環境準備**：確保已安裝 **.NET 10 SDK**。
